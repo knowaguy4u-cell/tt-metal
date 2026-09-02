@@ -146,6 +146,21 @@ jobs:
           retention-days: 14
           path: ${{ env.PIPELINE_DIR }}/
 
+      - name: 📈 Publish tt-train metrics
+        timeout-minutes: 5
+        if: ${{ !cancelled() && matrix.test-group.team == 'train' }}
+        uses: ./.github/actions/publish-tt-train-metrics
+        with:
+          # Since mpirun operates on a separate environment, metrics data are written to a shared
+          # NFS directory, PIPELINE_DIR. The action then copies it to the appropriate subdirectory
+          # under repo-root.
+          metrics-dir: ${{ env.PIPELINE_DIR }}/tt-train-metrics
+          repo-root: /home/user/tt-metal
+          plot-artifact-name: loss-plot-${{ matrix.test-group.name }}
+          sftp-ssh-private-key: ${{ secrets.TT_TRAIN_AWS_KEY }}
+          sftp-username: ${{ secrets.TT_TRAIN_AWS_USERNAME }}
+          sftp-hostname: ${{ secrets.TT_TRAIN_AWS_HOSTNAME }}
+
       - name: 🤖 AI job summary
         if: always() && !cancelled()
         continue-on-error: true
