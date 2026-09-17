@@ -231,15 +231,19 @@ class ttKDA:
         incoming_layer_carry: ttnn.Tensor,
         chronology: DeviceChronology | None,
         actual_start: ttnn.Tensor,
+        actual_end: ttnn.Tensor | None = None,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
         config = self.config
         if chronology is None:
             batch, rows, width = qkv.shape
             new_state = ttnn.slice(qkv, (0, rows - (config.conv_kernel_size - 1), 0), (batch, rows, width))
             predecessor = None
+        elif self.sequence_parallel_size == 1:
+            predecessor = None
+            new_state = chronology.select_local_final_history(qkv, 1)
         else:
             predecessor, new_state = exchange_convolution_carry(
-                qkv, sequence_parallel_axis=self.sequence_parallel_axis, chronology=chronology
+                qkv, sequence_parallel_axis=self.sequence_parallel_axis, chronology=chronology, actual_end=actual_end
             )
         q, k, v = ttnn.experimental.kda.qkv_causal_conv1d_silu(
             qkv,
@@ -249,7 +253,7 @@ class ttKDA:
             config.k_dim,
             config.v_dim,
             program_config=self.qkv_convolution_program_config,
-            actual_start=actual_start if chronology is not None else None,
+            actual_start=actual_start if self.sequence_parallel_size > 1 else None,
             sequence_parallel_axis=self.sequence_parallel_axis,
             predecessor_carry=predecessor,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
@@ -383,6 +387,7 @@ class ttKDA:
         hidden_states: ttnn.Tensor,
         state: KdaState,
         actual_start: ttnn.Tensor,
+        actual_end: ttnn.Tensor | None = None,
     ) -> tuple[ttnn.Tensor, KdaState]:
         """Run prefill KDA and return replacement logical carries.
 
@@ -394,14 +399,30 @@ class ttKDA:
         nonnegative, 32-aligned position. No device-to-host value validation is
         performed. Pass an explicit zero-valued tensor for a zero-start call.
 
+        Optional ``actual_end`` uses the same device-scalar representation and
+        lifetime. It is the exclusive absolute end of the valid interval. Both
+        bounds must be 32-aligned and satisfy 0 < end-start <= physical capacity.
+        Changing either scalar is supported within one capture. Output keeps its
+        physical shape; padded rows are unspecified. Returned carries stop at
+        the last valid token, and input padding cannot affect valid results.
+
         The input state is only read. No tensor reachable from it is used as a
         ``ttnn.copy`` destination or retained on this layer. The returned output
         is sequence-partitioned along SP and, when TP > 1, reduce-scattered on
         the hidden dimension; TP == 1 returns the full hidden dimension.
         """
         self._validate_forward(hidden_states, state, actual_start)
+        if actual_end is not None:
+            if not isinstance(actual_end, ttnn.Tensor):
+                raise TypeError("actual_end must be a device UINT32 scalar")
+            if (
+                actual_end.dtype != ttnn.uint32
+                or actual_end.layout != ttnn.ROW_MAJOR_LAYOUT
+                or any(d != 1 for d in actual_end.shape)
+            ):
+                raise ValueError("actual_end must be a UINT32 row-major scalar")
         chronology = None
-        if self.sequence_parallel_size > 1:
+        if self.sequence_parallel_size > 1 or actual_end is not None:
             chronology = DeviceChronology(
                 ttnn.experimental.kda.chronological_topology(
                     actual_start,
@@ -410,6 +431,7 @@ class ttKDA:
                     self.config.num_heads,
                     self.config.head_k_dim,
                     self.config.head_v_dim,
+                    actual_end=actual_end,
                 ),
             )
         projected = self._project_inputs(hidden_states)
@@ -417,12 +439,12 @@ class ttKDA:
         convolution_state = ttnn.to_layout(
             state.convolution, ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG
         )
-        q, k, v, new_convolution = self._convolve_qkv(qkv, convolution_state, chronology, actual_start)
+        q, k, v, new_convolution = self._convolve_qkv(qkv, convolution_state, chronology, actual_start, actual_end)
         gate, beta = self._compute_gates(
             beta=projected.beta,
             decay_rank=projected.decay_rank,
         )
-        if chronology is not None:
+        if self.sequence_parallel_size > 1:
             new_recurrent, output = self.recurrence.sequence_parallel(
                 q=q,
                 k=k,
@@ -432,6 +454,7 @@ class ttKDA:
                 initial_state=state.recurrent,
                 chronology=chronology,
                 actual_start=actual_start,
+                actual_end=actual_end,
             )
         else:
             new_recurrent, output = self.recurrence(
@@ -441,6 +464,9 @@ class ttKDA:
                 gate=gate,
                 beta=beta,
                 initial_state=state.recurrent,
+                actual_start=actual_start if actual_end is not None else None,
+                actual_end=actual_end,
+                sequence_parallel_axis=self.sequence_parallel_axis,
             )
         output = self._kda_rms_norm(output, projected.output_gate)
         output = self._project_output(output)

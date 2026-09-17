@@ -30,6 +30,12 @@ void bind_affine_exclusive_scan(nb::module_& mod) {
             entry[0] = initial_state
             entry[g] = A_{g-1} @ entry[g-1] + B_{g-1}
 
+        Optional ``actual_start`` and ``actual_end`` are replicated device UINT32
+        row-major scalars defining a 32-token-aligned, nonempty global interval.
+        ``actual_end`` requires ``actual_start``; omitting it retains full physical
+        capacity. Their contents may change during trace replay. Padded chunk/group
+        outputs are unspecified. Bounds are caller preconditions, not read on host.
+
         Args:
             a (ttnn.Tensor): Group multipliers ``[B*H*G, K, K]``. Must be a
                 TILE-layout FLOAT32 or BFLOAT16 device tensor.
@@ -88,6 +94,7 @@ void bind_affine_exclusive_scan(nb::module_& mod) {
         nb::arg("memory_config") = nb::none(),
         nb::arg("compute_kernel_config") = nb::none(),
         nb::arg("actual_start") = nb::none(),
+        nb::arg("actual_end") = nb::none(),
         nb::arg("sequence_parallel_axis") = 0,
         nb::arg("local_rows") = 0);
 }

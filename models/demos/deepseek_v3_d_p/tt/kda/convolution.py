@@ -11,6 +11,7 @@ def exchange_convolution_carry(
     *,
     sequence_parallel_axis: int,
     chronology: DeviceChronology,
+    actual_end: ttnn.Tensor | None = None,
 ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
     outgoing = chronology.select_outgoing_history(projected_qkv)
     gathered = ttnn.all_gather(
@@ -18,7 +19,13 @@ def exchange_convolution_carry(
     )
     predecessor = chronology.select_predecessor_history(gathered)
     batch, rows, width = projected_qkv.shape
-    physical_end = ttnn.slice(projected_qkv, (0, rows - outgoing.shape[1], 0), (batch, rows, width))
+    physical_end = (
+        ttnn.slice(projected_qkv, (0, rows - outgoing.shape[1], 0), (batch, rows, width))
+        if actual_end is None
+        else chronology.select_local_final_history(
+            projected_qkv, tuple(projected_qkv.device().shape)[sequence_parallel_axis]
+        )
+    )
     finals = ttnn.all_broadcast(physical_end, cluster_axis=sequence_parallel_axis)
     candidates = ttnn.concat(finals, dim=1, memory_config=ttnn.DRAM_MEMORY_CONFIG)
     final_carry = chronology.select_final_history(candidates)

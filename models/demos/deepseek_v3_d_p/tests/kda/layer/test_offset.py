@@ -258,11 +258,14 @@ def _assert_matches_reference(
     label: str,
     state_linf_threshold: float | None = STATE_LINF_THRESHOLD,
     pcc_threshold: float = PCC_THRESHOLD,
+    valid_length: int | None = None,
 ) -> None:
     """Undo MLA's row permutation, then compare output and both carries."""
     rotated_output = reconstruct_sp_tp_tensor(output_tt, mesh_device, sp_axis, tp_axis, tp_dim=2, sp_dim=1)
     natural_output = torch.empty_like(rotated_output)
     natural_output[:, permutation, :] = rotated_output
+    if valid_length is not None:
+        natural_output = natural_output[:, :valid_length]
 
     assert_accurate(
         expected_output,

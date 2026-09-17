@@ -55,7 +55,7 @@ def test_device_chronology(mesh_device, device_params, sp_axis):
                 boundary = (s // rows) % p
                 split = s % rows != 0 and p > 1
                 got = ttnn.to_torch(shard).to(torch.int64)
-                assert tuple(got.shape) == (7 + 2 * p, 8)
+                assert tuple(got.shape) == (8 + 2 * p, 8)
                 end = rows - s % rows if split and rank == boundary else rows
                 assert got[0, :3].tolist() == list(range(end - 3, end))
                 for step in range(p):

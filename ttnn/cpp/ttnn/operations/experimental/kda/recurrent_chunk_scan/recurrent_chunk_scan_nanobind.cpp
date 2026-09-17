@@ -20,6 +20,12 @@ void bind_recurrent_chunk_scan(nb::module_& mod) {
             Y_n     = q_decay_n @ S_n + intra_n @ U_n
             S_{n+1} = final_decay_n * S_n + k_dec_t_n @ U_n
 
+        Optional ``actual_start`` and ``actual_end`` are replicated device UINT32
+        row-major scalars defining a 32-token-aligned, nonempty global interval.
+        ``actual_end`` requires ``actual_start``; omitting it retains full physical
+        capacity. Their contents may change during trace replay. Padded chunk/group
+        outputs are unspecified. Bounds are caller preconditions, not read on host.
+
         Args:
             v_beta (ttnn.Tensor): Prepared values ``[B*H*G, N, 32, V]``.
             kd (ttnn.Tensor): Prepared decayed keys ``[B*H*G, N, 32, K]``.
@@ -86,6 +92,7 @@ void bind_recurrent_chunk_scan(nb::module_& mod) {
         nb::arg("memory_config") = nb::none(),
         nb::arg("compute_kernel_config") = nb::none(),
         nb::arg("actual_start") = nb::none(),
+        nb::arg("actual_end") = nb::none(),
         nb::arg("sequence_parallel_axis") = 0);
 
     ttnn::bind_function<"summarize_chunk_recurrence", "ttnn.experimental.kda.">(
@@ -106,6 +113,12 @@ void bind_recurrent_chunk_scan(nb::module_& mod) {
 
             B = F(0)
             A = F(I) - B
+
+        Optional ``actual_start`` and ``actual_end`` are replicated device UINT32
+        row-major scalars defining a 32-token-aligned, nonempty global interval.
+        ``actual_end`` requires ``actual_start``; omitting it retains full physical
+        capacity. Their contents may change during trace replay. Padded chunk/group
+        outputs are unspecified. Bounds are caller preconditions, not read on host.
 
         Args:
             v_beta (ttnn.Tensor): Prepared values ``[B*H*G, N, 32, V]``.
@@ -172,6 +185,7 @@ void bind_recurrent_chunk_scan(nb::module_& mod) {
         nb::arg("memory_config") = nb::none(),
         nb::arg("compute_kernel_config") = nb::none(),
         nb::arg("actual_start") = nb::none(),
+        nb::arg("actual_end") = nb::none(),
         nb::arg("sequence_parallel_axis") = 0);
 }
 

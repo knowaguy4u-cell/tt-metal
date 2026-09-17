@@ -114,6 +114,7 @@ template <
     uint32_t emit_tail_summaries,
     uint32_t groups_per_head,
     uint32_t dynamic_chronology,
+    uint32_t has_actual_end,
     uint32_t sp_rank,
     uint32_t sp_size,
     uint32_t local_rows>
@@ -148,7 +149,15 @@ TT_KERNEL void reader(uint32_t head, uint32_t value_block, uint32_t num_chunks, 
         noc.async_read(metadata, control, sizeof(uint32_t), {.page_id = 0}, {});
         noc.async_read_barrier();
         auto* words = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(control.get_write_ptr());
-        topology = kda_chronology::derive(words[0], sp_rank, sp_size, local_rows);
+        const uint32_t start = words[0];
+        if constexpr (has_actual_end) {
+            const auto end = TensorAccessor(tensor::actual_end);
+            noc.async_read(end, control, sizeof(uint32_t), {.page_id = 0}, {});
+            noc.async_read_barrier();
+            topology = kda_chronology::derive_interval(start, words[0], sp_rank, sp_size, local_rows);
+        } else {
+            topology = kda_chronology::derive(start, sp_rank, sp_size, local_rows);
+        }
         kda_chronology::store(words, topology);
         control.push_back(1);
     }
@@ -159,6 +168,11 @@ TT_KERNEL void reader(uint32_t head, uint32_t value_block, uint32_t num_chunks, 
         auto* words = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(writer_control.get_write_ptr());
         kda_chronology::store(words, topology);
         writer_control.push_back(1);
+    }
+    const uint32_t valid_chunks =
+        dynamic_chronology ? topology.valid_chunks(head % groups_per_head, groups_per_head) : num_chunks;
+    if (valid_chunks == 0) {
+        return;
     }
     // The explicit segmented path resolves its candidate wrap against this
     // device's scalar indicator. Compute follows the same chunk schedule on
@@ -199,7 +213,7 @@ TT_KERNEL void reader(uint32_t head, uint32_t value_block, uint32_t num_chunks, 
             initial_state_accessor, state, noc, head * Kt * Vt_full, Kt, value_block);
     }
 
-    for (uint32_t chunk = 0; chunk < num_chunks; ++chunk) {
+    for (uint32_t chunk = 0; chunk < valid_chunks; ++chunk) {
         const uint32_t head_chunk = head * num_chunks + chunk;
         // Publish the post-wrap seed just in time, never before the loop. The state
         // DFB holds one kv payload and compute frees it only via pop_front at the

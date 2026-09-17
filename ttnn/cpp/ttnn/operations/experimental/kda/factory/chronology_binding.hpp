@@ -38,6 +38,7 @@ inline void bind_chronology(
     tt::tt_metal::experimental::ProgramSpec& spec,
     tt::tt_metal::experimental::ProgramRunArgs& run,
     const std::optional<Tensor>& actual_start,
+    const std::optional<Tensor>& actual_end,
     const Tensor& fallback,
     bool has_writer) {
     using namespace tt::tt_metal::experimental;
@@ -45,6 +46,10 @@ inline void bind_chronology(
     const auto& tensor = (actual_start ? *actual_start : fallback).mesh_tensor();
     spec.tensor_parameters.push_back({.unique_id = name, .spec = tensor.tensor_spec()});
     run.tensor_args.emplace(name, tensor);
+    const TensorParamName end_name{"actual_end"};
+    const auto& end_tensor = (actual_end ? *actual_end : fallback).mesh_tensor();
+    spec.tensor_parameters.push_back({.unique_id = end_name, .spec = end_tensor.tensor_spec()});
+    run.tensor_args.emplace(end_name, end_tensor);
     const DFBSpecName cc{"chronology_compute"}, wc{"chronology_writer"};
     spec.dataflow_buffers.push_back(
         {.unique_id = cc, .entry_size = 32, .num_entries = 1, .data_format_metadata = tt::DataFormat::UInt32});
@@ -59,7 +64,9 @@ inline void bind_chronology(
         } else if (kernel.unique_id == KernelSpecName{"writer"}) {
             kernel.dfb_bindings.push_back(ConsumerOf(wc, "chronology_writer"));
         } else {
+            kernel.compile_time_args.insert({"has_actual_end", uint32_t(actual_end.has_value())});
             kernel.tensor_bindings.push_back({name, "actual_start"});
+            kernel.tensor_bindings.push_back({end_name, "actual_end"});
             kernel.dfb_bindings.push_back(ProducerOf(cc, "chronology_compute"));
             if (has_writer) {
                 kernel.dfb_bindings.push_back(ProducerOf(wc, "chronology_writer"));

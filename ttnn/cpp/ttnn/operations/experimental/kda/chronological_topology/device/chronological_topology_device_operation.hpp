@@ -15,6 +15,7 @@ struct ChronologyParams {
 };
 struct ChronologyInputs {
     Tensor actual_start;
+    std::optional<Tensor> actual_end;
 };
 struct ChronologyFactory {
     static ttnn::device_operation::MeshWorkloadArtifacts create_mesh_workload_artifacts(

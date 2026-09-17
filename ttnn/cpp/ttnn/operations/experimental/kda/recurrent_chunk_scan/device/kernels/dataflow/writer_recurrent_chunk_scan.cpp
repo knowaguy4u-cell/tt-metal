@@ -172,18 +172,19 @@ FORCE_INLINE void write_segmented_summary(
 }
 
 template <uint32_t Ct, uint32_t Kt, uint32_t Vt, uint32_t VtFull>
-FORCE_INLINE void write_recurrent(uint32_t head, uint32_t value_block, uint32_t num_chunks) {
+FORCE_INLINE void write_recurrent(
+    uint32_t head, uint32_t value_block, uint32_t num_chunks, uint32_t valid_chunks, uint32_t final_head) {
     const auto output_accessor = TensorAccessor(tensor::output);
     const auto final_state_accessor = TensorAccessor(tensor::final_state);
     DataflowBuffer output(dfb::output);
     DataflowBuffer final_state(dfb::final_state);
     Noc noc;
 
-    for (uint32_t chunk = 0; chunk < num_chunks; ++chunk) {
+    for (uint32_t chunk = 0; chunk < valid_chunks; ++chunk) {
         const uint32_t row_base = (head * num_chunks + chunk) * Ct * VtFull;
         write_value_slice<Ct, Vt, VtFull>(output_accessor, output, noc, row_base, value_block);
     }
-    const uint32_t state_row_base = head * Kt * VtFull;
+    const uint32_t state_row_base = final_head * Kt * VtFull;
     write_value_slice<Kt, Vt, VtFull>(final_state_accessor, final_state, noc, state_row_base, value_block);
 }
 
@@ -203,6 +204,8 @@ TT_KERNEL void writer(
     uint32_t wrap_group,
     uint32_t split_in_group) {
     bool dynamic_wrap = false;
+    uint32_t valid_chunks = num_chunks;
+    uint32_t final_head = head;
     if constexpr (dynamic_chronology) {
         DataflowBuffer control(dfb::chronology_writer);
         control.wait_front(1);
@@ -211,7 +214,15 @@ TT_KERNEL void writer(
         uint32_t groups = topology.local_rows / 32 / num_chunks;
         wrap_group = topology.wrap_group(groups);
         split_in_group = topology.split_in_group(groups);
-        dynamic_wrap = topology.local_split;
+        dynamic_wrap = topology.has_valid_tail();
+        valid_chunks = topology.valid_chunks(group, groups);
+        if (valid_chunks == 0) {
+            return;
+        }
+        // Only the last active group publishes to the fixed final-group slot.
+        if (group + 1 == topology.active_groups(groups)) {
+            final_head = head - group + groups - 1;
+        }
     }
     if constexpr (summary_pair) {
         if constexpr (emit_tail_summaries) {
@@ -221,6 +232,6 @@ TT_KERNEL void writer(
             write_summary<Kt, Vt, Vt_full>(head, value_block);
         }
     } else {
-        write_recurrent<Ct, Kt, Vt, Vt_full>(head, value_block, num_chunks);
+        write_recurrent<Ct, Kt, Vt, Vt_full>(head, value_block, num_chunks, valid_chunks, final_head);
     }
 }

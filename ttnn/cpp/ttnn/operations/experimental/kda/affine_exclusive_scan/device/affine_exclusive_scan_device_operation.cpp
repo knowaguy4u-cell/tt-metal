@@ -22,12 +22,16 @@ AffineExclusiveScanOperation::program_factory_t AffineExclusiveScanOperation::se
 void AffineExclusiveScanOperation::validate_on_program_cache_miss(
     const operation_attributes_t& attrs, const tensor_args_t& in) {
     constexpr std::string_view operation_name = "affine_exclusive_scan";
+    TT_FATAL(!in.actual_end || in.actual_start, "actual_end requires actual_start");
     if (in.actual_start) {
         TT_FATAL(
             attrs.local_rows > 0 && attrs.local_rows % 32 == 0 && (attrs.local_rows / 32) % attrs.groups_per_head == 0,
             "{}: local_rows must contain a positive whole number of 32-token chunks per group",
             operation_name);
         kda_factory_detail::check_actual_start(in.a, *in.actual_start, operation_name);
+        if (in.actual_end) {
+            kda_factory_detail::check_actual_start(in.a, *in.actual_end, operation_name);
+        }
     }
     constexpr std::array accepted_summary_dtypes = {tt::tt_metal::DataType::FLOAT32, tt::tt_metal::DataType::BFLOAT16};
     kda_factory_detail::check_allocated_device_tensor(in.a, operation_name, "a");
@@ -181,6 +185,7 @@ Tensor affine_exclusive_scan(
     const tt::tt_metal::MemoryConfig& mem,
     const DeviceComputeKernelConfig& cfg,
     const std::optional<Tensor>& actual_start,
+    const std::optional<Tensor>& actual_end,
     uint32_t sequence_parallel_axis,
     uint32_t local_rows) {
     // Cache-miss validation cannot protect attribute construction on cache hits. Keep these guards here because the
@@ -225,7 +230,8 @@ Tensor affine_exclusive_scan(
             .tail_b = tail_b,
             .tail_state = tail_state,
             .wrap_indicator = wrap_indicator,
-            .actual_start = actual_start});
+            .actual_start = actual_start,
+            .actual_end = actual_end});
     return outputs[0];
 }
 }  // namespace ttnn::experimental::prim

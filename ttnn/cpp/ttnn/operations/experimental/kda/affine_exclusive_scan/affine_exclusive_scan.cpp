@@ -21,6 +21,7 @@ ttnn::Tensor affine_exclusive_scan(
     const std::optional<ttnn::MemoryConfig>& memory_config,
     const std::optional<ttnn::DeviceComputeKernelConfig>& compute_kernel_config,
     const std::optional<ttnn::Tensor>& actual_start,
+    const std::optional<ttnn::Tensor>& actual_end,
     uint32_t sequence_parallel_axis,
     uint32_t local_rows) {
     TT_FATAL(
@@ -54,6 +55,7 @@ ttnn::Tensor affine_exclusive_scan(
         output_memory_config,
         kernel_config,
         actual_start,
+        actual_end,
         sequence_parallel_axis,
         local_rows);
 }

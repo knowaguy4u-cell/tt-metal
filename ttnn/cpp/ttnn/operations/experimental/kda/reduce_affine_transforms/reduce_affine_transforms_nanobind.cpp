@@ -31,6 +31,12 @@ void bind_reduce_affine_transforms(nb::module_& mod) {
             A_total = A_g @ A_total
             B_total = A_g @ B_total + B_g
 
+        Optional ``actual_start`` and ``actual_end`` are replicated device UINT32
+        row-major scalars defining a 32-token-aligned, nonempty global interval.
+        ``actual_end`` requires ``actual_start``; omitting it retains full physical
+        capacity. Their contents may change during trace replay. Padded chunk/group
+        outputs are unspecified. Bounds are caller preconditions, not read on host.
+
         Args:
             a (ttnn.Tensor): Group multipliers ``[B*H*G, K, K]``. Each leading
                 entry represents one batch-head-group. Must be a TILE-layout
@@ -76,6 +82,7 @@ void bind_reduce_affine_transforms(nb::module_& mod) {
         nb::arg("memory_config") = nb::none(),
         nb::arg("compute_kernel_config") = nb::none(),
         nb::arg("actual_start") = nb::none(),
+        nb::arg("actual_end") = nb::none(),
         nb::arg("sequence_parallel_axis") = 0,
         nb::arg("local_rows") = 0);
 }

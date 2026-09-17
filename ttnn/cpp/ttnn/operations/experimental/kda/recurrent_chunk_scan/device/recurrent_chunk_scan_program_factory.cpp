@@ -485,7 +485,7 @@ ttnn::device_operation::MeshWorkloadArtifacts RecurrentChunkScanProgramFactory::
         run_args.tensor_args.emplace(tail_output_tensor_name, outputs[2].mesh_tensor());
         run_args.tensor_args.emplace(tail_final_state_tensor_name, outputs[3].mesh_tensor());
     }
-    kda_factory_detail::bind_chronology(spec, run_args, in.actual_start, in.v_beta, true);
+    kda_factory_detail::bind_chronology(spec, run_args, in.actual_start, in.actual_end, in.v_beta, true);
     return kda_factory_detail::chronology_workload(
         ttnn::device_operation::ProgramArtifacts{.spec = std::move(spec), .run_params = std::move(run_args)},
         tensor_coords,

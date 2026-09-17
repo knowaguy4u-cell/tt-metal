@@ -51,6 +51,7 @@ struct RecurrentChunkScanInputs {
     // make a device-local summary limit or recurrent reseed decision.
     std::optional<Tensor> wrap_indicator;
     std::optional<Tensor> actual_start;
+    std::optional<Tensor> actual_end;
 };
 
 }  // namespace ttnn::experimental::prim

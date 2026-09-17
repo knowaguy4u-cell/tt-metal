@@ -14,6 +14,7 @@ std::pair<ttnn::Tensor, ttnn::Tensor> reduce_affine_transforms(
     const std::optional<ttnn::MemoryConfig>& memory_config,
     const std::optional<ttnn::DeviceComputeKernelConfig>& compute_kernel_config,
     const std::optional<ttnn::Tensor>& actual_start,
+    const std::optional<ttnn::Tensor>& actual_end,
     uint32_t sequence_parallel_axis,
     uint32_t local_rows) {
     TT_FATAL(
@@ -31,7 +32,15 @@ std::pair<ttnn::Tensor, ttnn::Tensor> reduce_affine_transforms(
         /*default_fp32_acc=*/true,
         /*default_l1_acc=*/false);
     return ttnn::experimental::prim::reduce_affine_transforms(
-        a, b, groups_per_head, output_memory_config, kernel_config, actual_start, sequence_parallel_axis, local_rows);
+        a,
+        b,
+        groups_per_head,
+        output_memory_config,
+        kernel_config,
+        actual_start,
+        actual_end,
+        sequence_parallel_axis,
+        local_rows);
 }
 
 }  // namespace ttnn::experimental::kda

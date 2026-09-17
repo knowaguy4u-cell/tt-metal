@@ -310,7 +310,7 @@ ttnn::device_operation::MeshWorkloadArtifacts AffineExclusiveScanProgramFactory:
         {wrap_indicator_tensor_name, wrap_indicator},
     };
 
-    kda_factory_detail::bind_chronology(program_spec, program_run_args, in.actual_start, in.a, false);
+    kda_factory_detail::bind_chronology(program_spec, program_run_args, in.actual_start, in.actual_end, in.a, false);
     return kda_factory_detail::chronology_workload(
         ttnn::device_operation::ProgramArtifacts{
             .spec = std::move(program_spec),
