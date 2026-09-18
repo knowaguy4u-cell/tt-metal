@@ -5,6 +5,7 @@
 #pragma once
 
 #include <atomic>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -155,8 +156,7 @@ public:
     void unmirror_lockstep_allocation(DeviceAddr address);
 
     void reserve_per_core_program(
-        const std::unordered_map<CoreCoord, uint32_t>& program_end_by_core,
-        DeviceAddr program_base);
+        const std::unordered_map<CoreCoord, uint32_t>& program_end_by_core, DeviceAddr program_base);
 
     // Device-global L1 arena for allocations that outlive individual programs.
     PersistentL1Arena& persistent_l1() { return persistent_l1_; }
@@ -214,6 +214,10 @@ private:
     std::unique_ptr<AllocatorConfig> config_;
 
     PersistentL1Arena persistent_l1_;
+    // Program text is fixed in L1 before program-local CB placement. Seal its
+    // cores immediately so a concurrent or intervening persistent allocation
+    // cannot enter the validated program extent before CB placement seals it.
+    std::optional<PersistentL1Arena::Seal> per_core_program_persistent_l1_seal_;
 
     // External view of the allocator, this shouldn't need to be a unique_ptr, but currently kept as so to preserve API
     // stability

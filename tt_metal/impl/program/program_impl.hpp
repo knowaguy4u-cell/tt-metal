@@ -521,6 +521,10 @@ private:
 
     bool finalized_{false};
     bool per_core_program_reservation_{false};
+    // Absolute end of the kernel-config/program image on each active Tensix.
+    // In per-core reservation mode this is also the lower bound for local CB,
+    // DFB, and scratch allocations on the corresponding cores.
+    std::unordered_map<CoreCoord, uint32_t> program_end_by_core_;
     bool program_run_args_initialized_{false};
     // Used only when devices do not have virtualization enabled and used to check that programs are only rerun on
     // the same device
@@ -571,7 +575,7 @@ private:
     std::unordered_map<CoreCoord, std::bitset<NUM_CIRCULAR_BUFFERS>> per_core_local_cb_indices_;
     std::unordered_map<CoreCoord, std::bitset<NUM_CIRCULAR_BUFFERS>> per_core_remote_cb_indices_;
     std::unordered_map<ChipId, ProgramBinaryStatus> binaries_on_device_;
-    // Used to generate circular buffer addresses. There is one CircularBufferAllocator per unique CoreRange
+    // Used to generate circular buffer addresses. There is one CircularBufferAllocator per participating core.
     std::vector<CircularBufferAllocator> cb_allocators_;
     // Tracks which devices this program has CBs allocated on (for CB memory reporting)
     std::unordered_set<const IDevice*> cb_devices_;

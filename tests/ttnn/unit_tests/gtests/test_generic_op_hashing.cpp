@@ -64,6 +64,17 @@ ttsl::hash::hash_t program_hash(const experimental::blaze::NamedKernelArgs& args
     return ttnn::operations::generic::compute_program_descriptor_hash(descriptor);
 }
 
+ttsl::hash::hash_t cb_program_hash(uint32_t local_address_group) {
+    CBDescriptor cb{
+        .total_size = 2048,
+        .core_ranges = CoreRangeSet(CoreRange(kCore0)),
+        .format_descriptors = {{.buffer_index = 0, .data_format = tt::DataFormat::Float16_b, .page_size = 2048}},
+        .local_address_group = local_address_group,
+    };
+    ProgramDescriptor descriptor{.cbs = {cb}};
+    return ttnn::operations::generic::compute_program_descriptor_hash(descriptor);
+}
+
 experimental::blaze::NamedKernelArgs common_scalar(std::string name, uint32_t value) {
     return experimental::blaze::NamedKernelArgs{.named_common_runtime_args = {{std::move(name), value}}};
 }
@@ -110,4 +121,32 @@ TEST(GenericOpNamedArgsHash, ValueOnlyDifferenceKeepsHash) {
     };
     EXPECT_EQ(program_hash(a), program_hash(b))
         << "Named-arg values (and per-core core count) must not change the generic-op program hash";
+}
+
+TEST(GenericOpCircularBufferHash, LocalAddressGroupChangesHash) {
+    using namespace genop_named_args_hash_test;
+    EXPECT_NE(cb_program_hash(0), cb_program_hash(1))
+        << "CB address-group semantics must be part of the generic-op program-cache key";
+}
+
+TEST(ProgramDescriptorMerge, RemapsLocalAddressGroupsPerDescriptor) {
+    using namespace genop_named_args_hash_test;
+    auto make_cb = [](CoreCoord core, uint32_t buffer_index) {
+        return CBDescriptor{
+            .total_size = 2048,
+            .core_ranges = CoreRangeSet(CoreRange(core)),
+            .format_descriptors =
+                {{.buffer_index = buffer_index, .data_format = tt::DataFormat::Float16_b, .page_size = 2048}},
+            .local_address_group = 1,
+        };
+    };
+    ProgramDescriptor first{.cbs = {make_cb(kCore0, 0)}};
+    ProgramDescriptor second{.cbs = {make_cb(kCore1, 1), make_cb(kCore1, 2)}};
+
+    auto merged = merge_program_descriptors({first, second});
+
+    ASSERT_EQ(merged.cbs.size(), 3);
+    EXPECT_EQ(merged.cbs[0].local_address_group, 1);
+    EXPECT_EQ(merged.cbs[1].local_address_group, 2);
+    EXPECT_EQ(merged.cbs[2].local_address_group, 2);
 }

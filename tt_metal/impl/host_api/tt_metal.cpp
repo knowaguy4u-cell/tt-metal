@@ -172,6 +172,26 @@ void ConfigureKernelGroup(
     const Hal& hal) {
     uint32_t kernel_config_base =
         hal.get_dev_addr(hal.get_programmable_core_type(programmable_core_type_index), HalL1MemAddrType::KERNEL_CONFIG);
+    if (std::getenv("TT_METAL_DUMP_PER_CORE_L1") != nullptr && logical_core == CoreCoord(3, 1)) {
+        const auto kernel_config = kernel_group->launch_msg.view().kernel_config();
+        log_info(
+            tt::LogMetal,
+            "PER_CORE_KERNEL program={} device={} core=3-1 enables={:#x} "
+            "offsets=[{},{},{},{},{}] sizes=[{},{},{},{},{}]",
+            program.impl().get_id(),
+            device->id(),
+            kernel_config.enables(),
+            kernel_config.kernel_text_offset()[0],
+            kernel_config.kernel_text_offset()[1],
+            kernel_config.kernel_text_offset()[2],
+            kernel_config.kernel_text_offset()[3],
+            kernel_config.kernel_text_offset()[4],
+            kernel_config.kernel_text_size()[0],
+            kernel_config.kernel_text_size()[1],
+            kernel_config.kernel_text_size()[2],
+            kernel_config.kernel_text_size()[3],
+            kernel_config.kernel_text_size()[4]);
+    }
     for (auto kernel_id : kernel_group->kernel_ids) {
         // Need the individual offsets of each bin
         // TODO: make configure take a std::span
@@ -1201,8 +1221,7 @@ bool ConfigureDeviceWithProgram(IDevice* device, Program& program, bool force_sl
                         prefetcher_pipe_vec[base + 2] = participant.relay_dfb_id;
                     }
                     uint64_t addr = kernel_config_base + prefetcher_pipe_offset;
-                    metal_ctx.get_cluster().write_core(
-                        device_id, physical_core, prefetcher_pipe_vec, addr);
+                    metal_ctx.get_cluster().write_core(device_id, physical_core, prefetcher_pipe_vec, addr);
                 }
             }
             program.impl().init_semaphores(*device, logical_core, index);

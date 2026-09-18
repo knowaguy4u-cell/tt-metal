@@ -392,6 +392,25 @@ DeviceAddr detail::ProgramImpl::reserve_program_local_l1(const IDevice* device, 
         }
         sealed_cores.emplace(core, arena.seal(CoreRangeSet(CoreRange(core))));
     }
+    if (per_core_program_reservation_ && !program_end_by_core_.empty()) {
+        // The legacy arena begins at the global kernel-config frontier.  Once
+        // this program has a finalized per-core binary layout, that frontier
+        // is unnecessarily conservative on a core with no persistent arena
+        // allocations. Start immediately after the real program image there.
+        // If a persistent allocation is present, its high-water mark remains
+        // the lower bound, preserving the arena's non-overlap contract.
+        DeviceAddr base = 0;
+        for (const CoreCoord& core : corerange_to_cores(cores)) {
+            auto it = program_end_by_core_.find(core);
+            TT_FATAL(
+                it != program_end_by_core_.end(),
+                "Program-local L1 is requested on core {}, but the per-core program layout has no extent for it",
+                core);
+            const DeviceAddr program_end = static_cast<DeviceAddr>(it->second);
+            base = std::max(base, arena.high_water_mark(CoreRangeSet(CoreRange(core)), program_end));
+        }
+        return base;
+    }
     return arena.high_water_mark(cores);
 }
 
@@ -1214,20 +1233,48 @@ void detail::ProgramImpl::update_kernel_groups(uint32_t programmable_core_type_i
 void detail::ProgramImpl::CircularBufferAllocator::mark_address(
     uint64_t address, uint64_t size, uint64_t base_address) {
     if (this->l1_regions.empty()) {
-        this->l1_regions.emplace_back(base_address, base_address);
-    }
-    auto& last_region = this->l1_regions.back();
-    if (address < last_region.second) {
-        TT_THROW(
-            "Local buffer address {} has to append to last L1 region [{}, {}) or be at a higher address",
+        TT_FATAL(
+            address >= base_address,
+            "Local buffer address {} is below its program-local L1 base {}",
             address,
-            last_region.first,
-            last_region.second);
-    }
-    if (address == last_region.second) {
-        last_region.second += size;
-    } else {
+            base_address);
         this->l1_regions.emplace_back(address, address + size);
+        return;
+    }
+    const uint64_t end = address + size;
+    auto next = std::lower_bound(
+        this->l1_regions.begin(), this->l1_regions.end(), address, [](const auto& region, uint64_t value) {
+            return region.first < value;
+        });
+    auto previous = next == this->l1_regions.begin() ? next : std::prev(next);
+    if (previous != next && address < previous->second) {
+        TT_THROW(
+            "Local buffer region [{}, {}) overlaps existing L1 region [{}, {})",
+            address,
+            end,
+            previous->first,
+            previous->second);
+    }
+    if (next != this->l1_regions.end() && end > next->first) {
+        TT_THROW(
+            "Local buffer region [{}, {}) overlaps existing L1 region [{}, {})",
+            address,
+            end,
+            next->first,
+            next->second);
+    }
+
+    const bool joins_previous = previous != next && previous->second == address;
+    const bool joins_next = next != this->l1_regions.end() && end == next->first;
+    if (joins_previous && joins_next) {
+        previous->second = next->second;
+        this->l1_regions.erase(next);
+    } else if (joins_previous) {
+        previous->second = end;
+    } else if (joins_next) {
+        next->first = address;
+    } else {
+        this->l1_regions.insert(next, {address, end});
     }
 }
 
@@ -1284,14 +1331,21 @@ CBHandle detail::ProgramImpl::add_circular_buffer_(const std::shared_ptr<Circula
             }
         }
 
-        // There is one CircularBufferAllocator per unique core range, create one if it does not already exist for
-        // current core range
-        auto val = std::find_if(
-            cb_allocators_.begin(), cb_allocators_.end(), [&core_range](const CircularBufferAllocator& cb_allocator) {
-                return cb_allocator.core_range == core_range;
-            });
-        if (val == cb_allocators_.end()) {
-            this->cb_allocators_.emplace_back(core_range);
+        // Allocation pressure is inherently per core.  Keeping an allocator
+        // for an entire descriptor rectangle unnecessarily couples cores that
+        // can have different program extents and (for address-grouped remote
+        // CBs) different capacities.
+        for (const CoreCoord& core : core_range) {
+            const CoreRange singleton(core);
+            auto val = std::find_if(
+                cb_allocators_.begin(),
+                cb_allocators_.end(),
+                [&singleton](const CircularBufferAllocator& cb_allocator) {
+                    return cb_allocator.core_range == singleton;
+                });
+            if (val == cb_allocators_.end()) {
+                this->cb_allocators_.emplace_back(singleton);
+            }
         }
     }
 
@@ -1897,6 +1951,35 @@ void detail::ProgramImpl::allocate_circular_buffers(const IDevice* device) {
             reserve_program_local_l1(device, circular_buffer->core_ranges());
         }
     }
+    const uint64_t alignment = device->allocator()->get_alignment(BufferType::DRAM);
+    auto first_common_fit = [&](const std::unordered_map<CircularBufferAllocator*, uint64_t>& sizes) {
+        uint64_t candidate = 0;
+        for (const auto& [allocator, size] : sizes) {
+            (void)size;
+            candidate = std::max(candidate, reserve_program_local_l1(device, CoreRangeSet(allocator->core_range)));
+        }
+        while (true) {
+            candidate = align(candidate, alignment);
+            uint64_t next_candidate = candidate;
+            for (const auto& [allocator, size] : sizes) {
+                for (const auto& region : allocator->l1_regions) {
+                    if (candidate + size <= region.first) {
+                        break;
+                    }
+                    if (candidate >= region.second) {
+                        continue;
+                    }
+                    next_candidate = std::max(next_candidate, region.second);
+                    break;
+                }
+            }
+            if (next_candidate == candidate) {
+                return candidate;
+            }
+            candidate = next_candidate;
+        }
+    };
+    std::unordered_set<uint32_t> allocated_address_groups;
     for (const auto& circular_buffer : this->circular_buffers_) {
         if (circular_buffer->globally_allocated()) {
             // Track globally allocated CBs too (they use L1 memory allocated via the allocator)
@@ -1911,31 +1994,77 @@ void detail::ProgramImpl::allocate_circular_buffers(const IDevice* device) {
             continue;
         }
 
-        uint64_t computed_addr = reserve_program_local_l1(device, circular_buffer->core_ranges());
-        for (const CoreRange& core_range : circular_buffer->core_ranges().ranges()) {
-            // Need the max available address across all cores circular buffer is placed on
-            for (const CircularBufferAllocator& cb_allocator : this->cb_allocators_) {
-                if (cb_allocator.core_range == core_range) {
-                    computed_addr = std::max(computed_addr, cb_allocator.get_cb_region_end());
-                    break;
+        const uint32_t address_group = circular_buffer->local_address_group();
+        if (address_group != 0) {
+            if (!allocated_address_groups.insert(address_group).second) {
+                continue;
+            }
+
+            std::vector<std::shared_ptr<CircularBufferImpl>> members;
+            for (const auto& candidate : this->circular_buffers_) {
+                if (!candidate->globally_allocated() && candidate->local_address_group() == address_group) {
+                    members.push_back(candidate);
                 }
+            }
+            TT_FATAL(
+                members.size() > 1, "Static CB address group {} must contain at least two descriptors", address_group);
+            for (size_t member_index = 0; member_index < members.size(); ++member_index) {
+                for (size_t other_index = member_index + 1; other_index < members.size(); ++other_index) {
+                    TT_FATAL(
+                        !members[member_index]->core_ranges().intersects(members[other_index]->core_ranges()),
+                        "Static CB address group {} has overlapping core ranges {} and {}",
+                        address_group,
+                        members[member_index]->core_ranges().str(),
+                        members[other_index]->core_ranges().str());
+                }
+            }
+
+            std::unordered_map<CircularBufferAllocator*, uint64_t> size_by_allocator;
+            for (const auto& member : members) {
+                for (CircularBufferAllocator& allocator : this->cb_allocators_) {
+                    if (member->core_ranges().intersects(allocator.core_range)) {
+                        // Allocators are keyed by the rectangular ranges used by
+                        // every CB in the program.  Such a range may intersect
+                        // multiple disjoint members of this address group.  It
+                        // represents one allocation cursor, so reserve it once
+                        // using the largest capacity required by any member it
+                        // intersects.
+                        size_by_allocator[&allocator] =
+                            std::max<uint64_t>(size_by_allocator[&allocator], member->size());
+                    }
+                }
+            }
+            const uint64_t group_addr = first_common_fit(size_by_allocator);
+
+            for (const auto& [allocator, size] : size_by_allocator) {
+                const uint64_t allocator_base = reserve_program_local_l1(device, CoreRangeSet(allocator->core_range));
+                allocator->mark_address(group_addr, size, allocator_base);
+            }
+            for (const auto& member : members) {
+                for (const IDevice* dev : devices_to_track) {
+                    tt::tt_metal::GraphTracker::instance().track_allocate_cb(
+                        member->core_ranges(), group_addr, member->size(), member->globally_allocated(), dev);
+                }
+                member->set_locally_allocated_address(group_addr);
+            }
+            continue;
+        }
+
+        std::vector<CircularBufferAllocator*> touched;
+        touched.reserve(this->cb_allocators_.size());
+        for (CircularBufferAllocator& allocator : this->cb_allocators_) {
+            if (circular_buffer->core_ranges().intersects(allocator.core_range)) {
+                touched.push_back(&allocator);
             }
         }
-        computed_addr = align(computed_addr, device->allocator()->get_alignment(BufferType::DRAM));
-        for (const CoreRange& core_range : circular_buffer->core_ranges().ranges()) {
-            for (CircularBufferAllocator& cb_allocator : this->cb_allocators_) {
-                if (cb_allocator.core_range.intersects(core_range)) {
-                    if (cb_allocator.core_range != core_range and computed_addr < cb_allocator.get_cb_region_end()) {
-                        // Intersecting core range has already been marked to have allocation at this address. This
-                        // could have been marked by a circular buffer on a core range disjoint from current
-                        // `core_range` but also intersecting `cb_allocator.core_range`
-                        continue;
-                    }
-                    const uint64_t allocator_base =
-                        reserve_program_local_l1(device, CoreRangeSet(cb_allocator.core_range));
-                    cb_allocator.mark_address(computed_addr, circular_buffer->size(), allocator_base);
-                }
-            }
+        std::unordered_map<CircularBufferAllocator*, uint64_t> size_by_allocator;
+        for (CircularBufferAllocator* allocator : touched) {
+            size_by_allocator.emplace(allocator, circular_buffer->size());
+        }
+        const uint64_t computed_addr = first_common_fit(size_by_allocator);
+        for (CircularBufferAllocator* allocator : touched) {
+            const uint64_t allocator_base = reserve_program_local_l1(device, CoreRangeSet(allocator->core_range));
+            allocator->mark_address(computed_addr, circular_buffer->size(), allocator_base);
         }
         // Report CB allocation for ALL devices being tracked
         for (const IDevice* dev : devices_to_track) {
@@ -2052,6 +2181,7 @@ void detail::ProgramImpl::validate_circular_buffer_region(const IDevice* device)
         }
     }
 
+    std::optional<std::tuple<CoreRange, DeviceAddr, uint64_t>> deferred_worker_collision;
     for (const CircularBufferAllocator& cb_allocator : this->cb_allocators_) {
         if (cb_allocator.l1_regions.empty()) {
             continue;
@@ -2113,7 +2243,26 @@ void detail::ProgramImpl::validate_circular_buffer_region(const IDevice* device)
                 }
             }
         }
+        if (std::getenv("TT_METAL_DUMP_PER_CORE_L1") != nullptr) {
+            const CoreCoord core = cb_allocator.core_range.start_coord;
+            const auto program_end = program_end_by_core_.find(core);
+            log_info(
+                tt::LogMetal,
+                "PER_CORE_L1 program={} core={} program_end={} cb_end={} tensor_frontier={} slack={}",
+                this->id,
+                core,
+                program_end == program_end_by_core_.end() ? 0 : program_end->second,
+                cb_region_end,
+                lowest_address.value_or(max_l1_size),
+                static_cast<int64_t>(lowest_address.value_or(max_l1_size)) - static_cast<int64_t>(cb_region_end));
+        }
         if (lowest_address.has_value() and lowest_address.value() < cb_region_end) {
+            if (std::getenv("TT_METAL_DUMP_PER_CORE_L1") != nullptr) {
+                if (!deferred_worker_collision.has_value()) {
+                    deferred_worker_collision.emplace(cb_allocator.core_range, lowest_address.value(), cb_region_end);
+                }
+                continue;
+            }
             TT_THROW(
                 "Statically allocated circular buffers in program {} clash with L1 buffers on core range {}. L1 buffer "
                 "allocated at {} and static circular buffer region ends at {}",
@@ -2122,6 +2271,16 @@ void detail::ProgramImpl::validate_circular_buffer_region(const IDevice* device)
                 lowest_address.value(),
                 cb_region_end);
         }
+    }
+    if (deferred_worker_collision.has_value()) {
+        const auto& [core_range, tensor_frontier, cb_region_end] = *deferred_worker_collision;
+        TT_THROW(
+            "Statically allocated circular buffers in program {} clash with L1 buffers on core range {}. L1 buffer "
+            "allocated at {} and static circular buffer region ends at {}",
+            this->id,
+            core_range.str(),
+            tensor_frontier,
+            cb_region_end);
     }
 }
 
@@ -3190,17 +3349,25 @@ uint32_t detail::ProgramImpl::finalize_program_offsets(
 
         TT_ASSERT(state.offset == tt::align(state.offset, hal.get_alignment(HalMemType::L1)));
 
-        size_t max_size = get_ringbuffer_size(device, programmable_core_type);
-
-        TT_FATAL(
-            state.offset <= max_size,
-            "Program size ({}) too large for kernel config buffer ({}) on {}",
-            state.offset,
-            max_size,
-            enchantum::to_string(programmable_core_type));
-
         const bool reserve_per_core_program = std::ranges::any_of(
             programs, [](const ProgramImpl* program) { return program->uses_per_core_program_reservation(); });
+        size_t max_size = get_ringbuffer_size(device, programmable_core_type);
+        const bool use_per_core_tensix_layout =
+            reserve_per_core_program && programmable_core_type == HalProgrammableCoreType::TENSIX;
+
+        // The global ringbuffer frontier is only a conservative partition. In
+        // per-core mode the true boundary is program_end(core) followed by that
+        // core's program-local buffers; reallocation and allocator reservation
+        // below validate those regions against the real L1 allocations.
+        if (!use_per_core_tensix_layout) {
+            TT_FATAL(
+                state.offset <= max_size,
+                "Program size ({}) too large for kernel config buffer ({}) on {}",
+                state.offset,
+                max_size,
+                enchantum::to_string(programmable_core_type));
+        }
+
         if (reserve_per_core_program && programmable_core_type == HalProgrammableCoreType::TENSIX) {
             TT_FATAL(
                 std::ranges::all_of(
@@ -3213,6 +3380,13 @@ uint32_t detail::ProgramImpl::finalize_program_offsets(
                 hal.get_dev_addr(HalProgrammableCoreType::TENSIX, HalL1MemAddrType::KERNEL_CONFIG);
             for (auto& [core, program_end] : program_end_by_core) {
                 program_end += program_base;
+            }
+            // Slow dispatch finalizes kernel offsets before configuring local
+            // CBs, DFBs, and scratch. Retain the exact per-core lower bound so
+            // their first (and only) allocation is stable for the lifetime of
+            // the program.
+            for (ProgramImpl* program : programs) {
+                program->program_end_by_core_ = program_end_by_core;
             }
             device->allocator_impl()->reserve_per_core_program(program_end_by_core, program_base);
         }

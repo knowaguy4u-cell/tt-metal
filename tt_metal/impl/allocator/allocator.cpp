@@ -240,27 +240,75 @@ DeviceAddr AllocatorImpl::allocate_buffer(Buffer* buffer) {
 }
 
 void AllocatorImpl::reserve_per_core_program(
-    const std::unordered_map<CoreCoord, uint32_t>& program_end_by_core,
-    DeviceAddr program_base) {
+    const std::unordered_map<CoreCoord, uint32_t>& program_end_by_core, DeviceAddr program_base) {
     std::lock_guard<std::mutex> lock(mutex_);
     TT_FATAL(
-        config_->allocator_mode == AllocatorMode::HYBRID,
-        "Per-core program reservation requires HYBRID allocation");
+        config_->allocator_mode == AllocatorMode::HYBRID, "Per-core program reservation requires HYBRID allocation");
     TT_FATAL(!per_core_program_reserved_, "Only one per-core-reserved program may be resident on a device");
     TT_FATAL(!program_end_by_core.empty(), "Per-core program reservation requires at least one active core");
 
     using AllocatorID = BankManager::AllocatorDependencies::AllocatorID;
     const DeviceAddr expanded_end = config_->worker_l1_size - config_->l1_small_size;
-    DeviceAddr minimum_program_end = config_->l1_unreserved_base;
+    const auto lockstep_ranges = l1_manager_->extract_state(AllocatorID{0}).allocated_regions;
+    DeviceAddr minimum_program_end = expanded_end;
     DeviceAddr maximum_program_end = program_base;
+    std::vector<CoreCoord> program_cores;
+    program_cores.reserve(program_end_by_core.size());
+
+    // Validate the complete reservation before changing any allocator. A
+    // failure must not leave only a prefix of the participating cores marked.
     for (const auto& [core, program_end] : program_end_by_core) {
         TT_FATAL(
-            program_end >= program_base && program_end <= config_->l1_unreserved_base,
-            "Invalid program extent [{}, {}) on core {}; global reserved frontier is {}",
+            program_end >= program_base && program_end <= expanded_end,
+            "Invalid program extent [{}, {}) on core {}; usable worker L1 ends at {}",
             program_base,
             program_end,
             core,
-            config_->l1_unreserved_base);
+            expanded_end);
+        for (const auto& [range_begin, range_end] : lockstep_ranges) {
+            TT_FATAL(
+                program_end <= range_begin || program_base >= range_end,
+                "Per-core program extent [{}, {}) on core {} overlaps lockstep L1 allocation [{}, {})",
+                program_base,
+                program_end,
+                core,
+                range_begin,
+                range_end);
+        }
+        const auto bank_id = logical_core_to_bank_ids_.at(BufferType::L1).at(core).at(0);
+        const auto per_core_ranges = l1_manager_->extract_state(AllocatorID{bank_id + 1}).allocated_regions;
+        for (const auto& [range_begin, range_end] : per_core_ranges) {
+            TT_FATAL(
+                program_end <= range_begin || program_base >= range_end,
+                "Per-core program extent [{}, {}) on core {} overlaps per-core L1 allocation [{}, {})",
+                program_base,
+                program_end,
+                core,
+                range_begin,
+                range_end);
+        }
+        program_cores.push_back(core);
+        minimum_program_end = std::min(minimum_program_end, static_cast<DeviceAddr>(program_end));
+        maximum_program_end = std::max(maximum_program_end, static_cast<DeviceAddr>(program_end));
+    }
+
+    auto program_seal =
+        persistent_l1_.seal(CoreRangeSet(ttsl::Span<const CoreCoord>(program_cores.data(), program_cores.size())));
+    // Seal before inspecting persistent ranges so allocate() cannot insert a
+    // new persistent object between validation and program reservation.
+    for (const auto& [core, program_end] : program_end_by_core) {
+        for (const auto& [range_begin, range_end] : persistent_l1_.occupied_ranges(core)) {
+            TT_FATAL(
+                program_end <= range_begin || program_base >= range_end,
+                "Per-core program extent [{}, {}) on core {} overlaps persistent L1 allocation [{}, {})",
+                program_base,
+                program_end,
+                core,
+                range_begin,
+                range_end);
+        }
+    }
+    for (const auto& [core, program_end] : program_end_by_core) {
         const auto bank_id = logical_core_to_bank_ids_.at(BufferType::L1).at(core).at(0);
         l1_manager_->expand_and_mark_allocated(
             AllocatorID{bank_id + 1},
@@ -268,19 +316,17 @@ void AllocatorImpl::reserve_per_core_program(
             expanded_end - program_base,
             program_base,
             program_end - program_base);
-        minimum_program_end = std::min(minimum_program_end, static_cast<DeviceAddr>(program_end));
-        maximum_program_end = std::max(maximum_program_end, static_cast<DeviceAddr>(program_end));
     }
+    per_core_program_persistent_l1_seal_.emplace(std::move(program_seal));
     per_core_program_base_ = program_base;
     per_core_program_reserved_ = true;
     log_info(
         tt::LogMetal,
-        "Reserved per-core program L1 on {} cores; program ends [{}, {}], reclaimed [{}, {}] bytes per core",
+        "Reserved per-core program L1 on {} cores; program ends [{}, {}], global frontier {}",
         program_end_by_core.size(),
         minimum_program_end,
         maximum_program_end,
-        config_->l1_unreserved_base - maximum_program_end,
-        config_->l1_unreserved_base - minimum_program_end);
+        config_->l1_unreserved_base);
 }
 
 void AllocatorImpl::deallocate_buffer(Buffer* buffer) {
