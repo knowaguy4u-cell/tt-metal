@@ -301,6 +301,7 @@ ProgramDescriptor build_ring_distributed_sdpa_program_descriptor(
     reader_compile_time_args.push_back(0);  // mcast_enabled
     reader_compile_time_args.push_back(static_cast<uint32_t>(use_zigzag_balancing));  // arg 33
     reader_compile_time_args.push_back(0);  // arg 34: use_windowed_narrowing — ring is never windowed
+    reader_compile_time_args.push_back(0);  // arg 35: mask block map, never on ring
 
     TensorAccessorArgs(input_tensor_q.buffer()).append_to(reader_compile_time_args);
     TensorAccessorArgs(input_tensor_k.buffer()).append_to(reader_compile_time_args);
@@ -312,6 +313,7 @@ ProgramDescriptor build_ring_distributed_sdpa_program_descriptor(
     TensorAccessorArgs().append_to(reader_compile_time_args);  // chunk_start_idx_tensor (ring has no flexible chunked)
     TensorAccessorArgs().append_to(reader_compile_time_args);  // cu_window_seqlens (ring is never windowed)
     TensorAccessorArgs().append_to(reader_compile_time_args);  // windowed_q_token_offset_tensor (never windowed)
+    TensorAccessorArgs().append_to(reader_compile_time_args);  // attn_mask_block_map (never on ring)
 
     std::vector<uint32_t> writer_compile_time_args = {
         // interleaved accessor args
